@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nexus.3D - Voice Interface</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;700&family=JetBrains+Mono:wght@400&display=swap');
+        
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Inter', sans-serif;
+            background-color: #050505;
+            color: white;
+        }
+
+        #canvas-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+        }
+
+        .transcript-wrapper {
+            mask-image: linear-gradient(to bottom, transparent, black 15%, black 85%, transparent);
+            -webkit-mask-image: linear-gradient(to bottom, transparent, black 15%, black 85%, transparent);
+            scrollbar-width: none;
+        }
+        
+        .transcript-wrapper::-webkit-scrollbar { 
+            display: none; 
+        }
+
+        .interim { 
+            color: rgba(255, 255, 255, 0.4); 
+            font-style: italic; 
+        }
+        
+        .final { 
+            color: rgba(255, 255, 255, 1); 
+            text-shadow: 0 0 30px rgba(255,255,255,0.4); 
+        }
+
+        .pulse {
+            animation: pulse-red 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+
+        @keyframes pulse-red {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: .5; transform: scale(1.5); }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Minimalist Top Nav -->
+    <nav class="absolute top-0 left-0 w-full p-8 flex justify-between items-center z-20 pointer-events-none">
+        <div class="text-sm font-bold tracking-[0.2em] flex items-center gap-3">
+            <div id="connection-indicator" class="w-1.5 h-1.5 bg-white/50 rounded-full"></div>
+            NEXUS<span class="opacity-50">.VOICE</span>
+        </div>
+        <div class="text-[10px] uppercase tracking-widest opacity-50">
+            Audio Node // Active
+        </div>
+    </nav>
+
+    <div id="canvas-container"></div>
+
+    <!-- Floating Bottom UI -->
+    <div class="fixed bottom-0 left-0 w-full flex flex-col items-center z-10 pointer-events-none pb-12">
+        
+        <!-- Transcript Area: Floating and fading out at edges -->
+        <div id="transcript-container" class="pointer-events-auto w-full max-w-5xl text-center px-8 mb-8 h-[30vh] min-h-[200px] overflow-y-auto transcript-wrapper text-3xl md:text-5xl font-light leading-tight tracking-wide pt-[10vh]">
+            <span class="text-white/30 text-xl md:text-2xl block mt-4">System initialized. Awaiting input...</span>
+        </div>
+
+        <!-- Control Pill -->
+        <div class="pointer-events-auto flex items-center bg-black/40 backdrop-blur-xl border border-white/10 rounded-full p-2 pr-6 shadow-[0_10px_40px_rgba(0,0,0,0.5)]">
+            <!-- Mic Toggle Button -->
+            <button id="toggleBtn" class="flex items-center justify-center w-12 h-12 rounded-full bg-white text-black transition-all duration-300 hover:scale-105 shadow-[0_0_20px_rgba(255,255,255,0.2)]">
+                <svg id="mic-icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+            </button>
+            
+            <!-- Status Indicators -->
+            <div class="flex flex-col ml-4 mr-6 min-w-[80px]">
+                <span id="btn-text" class="text-[10px] font-bold tracking-[0.2em] text-white/70 uppercase">Standby</span>
+                <div id="live-tag" class="hidden items-center gap-2 mt-1">
+                    <span class="w-1.5 h-1.5 bg-red-500 rounded-full pulse"></span>
+                    <span class="text-[9px] text-red-500 font-bold tracking-widest">RECORDING</span>
+                </div>
+            </div>
+
+            <div class="w-px h-6 bg-white/10 mx-2"></div>
+
+            <!-- Clear Button -->
+            <button id="clearBtn" class="p-3 text-white/40 hover:text-white hover:bg-white/10 rounded-full transition-all group" title="Clear Transcript">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="group-hover:rotate-12 transition-transform"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
+            </button>
+        </div>
+    </div>
+
+    <script>
+        let scene, camera, renderer, particles;
+        let siriLayers = []; // Holds the morphing Siri orb layers
+        let mouseX = 0, mouseY = 0;
+        let isListening = false;
+        let recognition;
+        
+        // Audio Analyzer Variables
+        let audioContext, analyser, dataArray, audioSource;
+        let smoothedAudioLevel = 0;
+
+        // Initialize 3D Environment
+        function init3D() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 5;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            // Siri Morphing Orb
+            const createSiriLayer = (color, size, opacity, blending) => {
+                const geo = new THREE.SphereGeometry(size, 64, 64);
+                // Store original vertices for deformation
+                geo.userData.originalPositions = geo.attributes.position.clone();
+                const mat = new THREE.MeshBasicMaterial({
+                    color: color,
+                    transparent: true,
+                    opacity: opacity,
+                    blending: blending,
+                    depthWrite: false,
+                    wireframe: false
+                });
+                const mesh = new THREE.Mesh(geo, mat);
+                // Save base radius to use during animation
+                mesh.userData.baseRadius = size;
+                return mesh;
+            };
+
+            // Create multiple overlapping colored layers
+            siriLayers.push(createSiriLayer(0x00ffff, 1.6, 0.4, THREE.AdditiveBlending)); // Cyan
+            siriLayers.push(createSiriLayer(0xff00ff, 1.5, 0.4, THREE.AdditiveBlending)); // Magenta
+            siriLayers.push(createSiriLayer(0x0044ff, 1.4, 0.6, THREE.AdditiveBlending)); // Blue
+            siriLayers.push(createSiriLayer(0xffffff, 1.1, 0.8, THREE.NormalBlending));   // White Core
+
+            siriLayers.forEach(layer => scene.add(layer));
+
+            // Particles
+            const particlesGeom = new THREE.BufferGeometry();
+            const particlesCount = 1500;
+            const posArray = new Float32Array(particlesCount * 3);
+            for(let i=0; i < particlesCount * 3; i++) {
+                posArray[i] = (Math.random() - 0.5) * 15;
+            }
+            particlesGeom.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+            particles = new THREE.Points(particlesGeom, new THREE.PointsMaterial({
+                size: 0.005,
+                color: 0x4488ff,
+                transparent: true,
+                opacity: 0.5
+            }));
+            scene.add(particles);
+
+            scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+            const p1 = new THREE.PointLight(0x00ffff, 2); p1.position.set(5, 5, 5); scene.add(p1);
+            const p2 = new THREE.PointLight(0xff00ff, 2); p2.position.set(-5, -5, 5); scene.add(p2);
+
+            window.addEventListener('resize', onWindowResize);
+            document.addEventListener('mousemove', (e) => {
+                mouseX = (e.clientX / window.innerWidth) - 0.5;
+                mouseY = (e.clientY / window.innerHeight) - 0.5;
+            });
+
+            animate();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = Date.now() * 0.001;
+            
+            let currentAudioLevel = 0;
+
+            // React to live audio data from the microphone
+            if (isListening && analyser && dataArray) {
+                analyser.getByteFrequencyData(dataArray);
+                
+                let sum = 0;
+                for (let i = 0; i < dataArray.length; i++) {
+                    sum += dataArray[i];
+                }
+                const averageVolume = sum / dataArray.length; 
+                currentAudioLevel = averageVolume / 50; 
+            }
+
+            // Smooth the audio level for fluid transitions
+            smoothedAudioLevel += (currentAudioLevel - smoothedAudioLevel) * 0.15;
+            
+            // Base amplitude increases if listening, spikes heavily when speaking
+            const baseAmp = isListening ? 0.2 : 0.05;
+            const amp = baseAmp + (smoothedAudioLevel * 0.8);
+            
+            // Animate Siri Layers (Morphing Blob Effect)
+            siriLayers.forEach((layer, index) => {
+                layer.rotation.y += 0.002 * (index + 1);
+                layer.rotation.z += 0.001 * (index + 1);
+                
+                const posAttr = layer.geometry.attributes.position;
+                const origPos = layer.geometry.userData.originalPositions;
+                const v = new THREE.Vector3();
+                
+                for(let i=0; i < posAttr.count; i++) {
+                    v.fromBufferAttribute(origPos, i);
+                    
+                    // Frequencies for noise - varying by layer for a tangled/overlapping effect
+                    const freqX = 1.2 + index * 0.3;
+                    const freqY = 1.5 + index * 0.2;
+                    const freqZ = 1.1 + index * 0.4;
+                    
+                    // Complex sine wave combination for organic movement
+                    const noise = Math.sin(v.x * freqX + time * (1 + index*0.5)) * Math.cos(v.y * freqY + time * (1 + index*0.5)) * Math.sin(v.z * freqZ + time * (1 + index*0.5));
+                    
+                    const radius = layer.userData.baseRadius + (noise * amp);
+                    
+                    v.normalize().multiplyScalar(radius);
+                    posAttr.setXYZ(i, v.x, v.y, v.z);
+                }
+                posAttr.needsUpdate = true;
+                
+                // Pulsate the entire layer scale based on audio
+                const scale = 1 + (smoothedAudioLevel * 0.2);
+                layer.scale.set(scale, scale, scale);
+            });
+
+            // Particles react to audio
+            particles.rotation.y += 0.001 + (smoothedAudioLevel * 0.02);
+
+            camera.position.x += (mouseX * 1.5 - camera.position.x) * 0.05;
+            camera.position.y += (-mouseY * 1.5 - camera.position.y) * 0.05;
+            camera.lookAt(scene.position);
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // Initialize Speech Recognition
+        function initSpeech() {
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            
+            if (!SpeechRecognition) {
+                document.getElementById('transcript-container').innerHTML = '<span class="text-red-500">Speech API not supported in this browser.</span>';
+                document.getElementById('toggleBtn').style.display = 'none';
+                return;
+            }
+
+            recognition = new SpeechRecognition();
+            recognition.continuous = true;
+            recognition.interimResults = true;
+            recognition.lang = 'en-US';
+
+            const toggleBtn = document.getElementById('toggleBtn');
+            const btnText = document.getElementById('btn-text');
+            const liveTag = document.getElementById('live-tag');
+            const transcriptDiv = document.getElementById('transcript-container');
+            let finalTranscript = '';
+
+            recognition.onstart = () => {
+                isListening = true;
+                
+                toggleBtn.classList.remove('bg-white', 'text-black', 'shadow-[0_0_20px_rgba(255,255,255,0.2)]');
+                toggleBtn.classList.add('bg-red-500', 'text-white', 'shadow-[0_0_20px_rgba(239,68,68,0.4)]');
+                
+                btnText.innerText = "Active";
+                btnText.classList.add('text-white');
+                btnText.classList.remove('text-white/70');
+                
+                liveTag.classList.remove('hidden');
+                liveTag.classList.add('flex');
+            };
+
+            recognition.onend = () => {
+                isListening = false;
+                
+                toggleBtn.classList.add('bg-white', 'text-black', 'shadow-[0_0_20px_rgba(255,255,255,0.2)]');
+                toggleBtn.classList.remove('bg-red-500', 'text-white', 'shadow-[0_0_20px_rgba(239,68,68,0.4)]');
+                
+                btnText.innerText = "Standby";
+                btnText.classList.remove('text-white');
+                btnText.classList.add('text-white/70');
+                
+                liveTag.classList.add('hidden');
+                liveTag.classList.remove('flex');
+            };
+
+            recognition.onresult = (event) => {
+                let interimTranscript = '';
+                for (let i = event.resultIndex; i < event.results.length; ++i) {
+                    if (event.results[i].isFinal) {
+                        finalTranscript += event.results[i][0].transcript + '. ';
+                    } else {
+                        interimTranscript += event.results[i][0].transcript;
+                    }
+                }
+                
+                transcriptDiv.innerHTML = `<span class="final">${finalTranscript}</span><span class="interim">${interimTranscript}</span>`;
+                transcriptDiv.scrollTop = transcriptDiv.scrollHeight;
+            };
+
+            toggleBtn.onclick = async () => {
+                if (isListening) {
+                    recognition.stop();
+                } else {
+                    // Initialize the Web Audio API Analyser on first click
+                    if (!audioContext) {
+                        try {
+                            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                            analyser = audioContext.createAnalyser();
+                            analyser.fftSize = 256; // Defines frequency resolution
+                            audioSource = audioContext.createMediaStreamSource(stream);
+                            audioSource.connect(analyser);
+                            dataArray = new Uint8Array(analyser.frequencyBinCount);
+                        } catch (err) {
+                            console.warn("Microphone access needed for visualizer.", err);
+                        }
+                    } else if (audioContext.state === 'suspended') {
+                        await audioContext.resume();
+                    }
+                    
+                    recognition.start();
+                }
+            };
+
+            document.getElementById('clearBtn').onclick = () => {
+                finalTranscript = '';
+                transcriptDiv.innerHTML = '<span class="text-white/30 text-xl md:text-2xl block mt-4">System initialized. Awaiting input...</span>';
+            };
+        }
+
+        window.onload = () => {
+            init3D();
+            initSpeech();
+        };
+    </script>
+</body>
+</html>
